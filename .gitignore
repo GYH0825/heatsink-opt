@@ -1,2 +1,11 @@
 __pycache__/
 *.pyc
+
+# PyInstaller 构建产物：体积达数百 MB，且可由 *.spec 完整复现，不入库
+build/
+dist/
+
+# 构建与运行日志
+build_mcp.log
+build_pyinstaller.log
+daemon_start.log

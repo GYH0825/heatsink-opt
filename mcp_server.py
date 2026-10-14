@@ -14,6 +14,7 @@
 """
 
 from mcp.server.mcpserver import MCPServer
+from mcp_types import ToolAnnotations
 
 from sim import config as C
 from sim.geometry import HeatSink, fin_gap
@@ -33,6 +34,16 @@ server = MCPServer(
         "若复核不通过或结果不理想，调整参数后重新搜索。"
         "所有长度输入输出统一使用毫米。"
     ),
+)
+
+# 六个工具的 MCP 注解：它们都只在自身进程内做数值计算，不修改调用方的工作区
+# （render_temperature_field 只在本工具自己的 results/ 目录落一张输出图）。
+# 声明为只读 / 幂等 / 封闭域后，AGH 会把它们判为非破坏性工具，无需人工批准即可调用
+# （判定见 AGH packages/base/src/mcp/register.ts 对 readOnlyHint 的处理）。
+_READ_ONLY = ToolAnnotations(
+    read_only_hint=True,
+    idempotent_hint=True,
+    open_world_hint=False,
 )
 
 # 跨工具调用复用的评估缓存：AGH 反复询问同一设计时不必重新求解。
@@ -86,7 +97,8 @@ def _describe(hs, res, violation):
 
 @server.tool(description="获取优化问题的完整定义：设计变量与其取值范围（毫米）、"
                          "物理常量、散热器外形、网格分辨率、约束上限与目标函数。"
-                         "做任何规划之前先调用它。")
+                         "做任何规划之前先调用它。",
+             annotations=_READ_ONLY)
 def get_problem_spec() -> dict:
     return {
         "objective": "最小化结到环境的热阻 R_th [°C/W]；约束不满足时按违反度优先处理",
@@ -125,7 +137,8 @@ def get_problem_spec() -> dict:
 # ---------------------------------------------------------------- 能力调用
 
 @server.tool(description="仿真单个散热器设计，返回最高温度、热阻、质量、翅片间隙、"
-                         "约束是否满足以及是否可行。输入尺寸单位为毫米。")
+                         "约束是否满足以及是否可行。输入尺寸单位为毫米。",
+             annotations=_READ_ONLY)
 def simulate_design(n_fins: int, fin_height_mm: float,
                     fin_thickness_mm: float, base_thickness_mm: float) -> dict:
     hs = _make_hs(n_fins, fin_height_mm, fin_thickness_mm, base_thickness_mm)
@@ -160,7 +173,8 @@ def simulate_design(n_fins: int, fin_height_mm: float,
 
 @server.tool(description="运行一次参数搜索，返回最优设计及其性能指标，以及收敛过程摘要。"
                          "method 取 adaptive（自适应邻域搜索，默认）或 random（随机搜索基线）；"
-                         "budget 是设计评估次数上限（20–2000）。")
+                         "budget 是设计评估次数上限（20–2000）。",
+             annotations=_READ_ONLY)
 def search_designs(method: str = "adaptive", budget: int = 200, seed: int = 0) -> dict:
     if method not in ("adaptive", "random"):
         return {"error": f"未知的搜索方法 {method!r}，可选 adaptive / random"}
@@ -203,7 +217,8 @@ def search_designs(method: str = "adaptive", budget: int = 200, seed: int = 0) -
 
 
 @server.tool(description="把某个设计的温度场渲染成图片，用于人工核查与演示取证。"
-                         "返回图片路径。输入尺寸单位为毫米。")
+                         "返回图片路径。输入尺寸单位为毫米。",
+             annotations=_READ_ONLY)
 def render_temperature_field(n_fins: int, fin_height_mm: float,
                              fin_thickness_mm: float, base_thickness_mm: float) -> dict:
     import os
@@ -231,7 +246,8 @@ def render_temperature_field(n_fins: int, fin_height_mm: float,
 
 @server.tool(description="独立复核一个设计：从零重算几何可行性与约束，并把网格加密 refine 倍"
                          "重新求解，检查热阻是否收敛（相对偏差不超过 tol 即认为通过）。"
-                         "用于验证搜索结果是否可信。输入尺寸单位为毫米。")
+                         "用于验证搜索结果是否可信。输入尺寸单位为毫米。",
+             annotations=_READ_ONLY)
 def verify_design(n_fins: int, fin_height_mm: float, fin_thickness_mm: float,
                   base_thickness_mm: float, refine: int = 2, tol: float = 0.05) -> dict:
     refine = max(1, min(int(refine), 4))
@@ -270,7 +286,8 @@ def verify_design(n_fins: int, fin_height_mm: float, fin_thickness_mm: float,
 
 
 @server.tool(description="在相同评估预算下对比两种搜索方法（各跑多个随机种子），"
-                         "返回各自最优热阻的均值、标准差与相对改进。用于结论的最后核验。")
+                         "返回各自最优热阻的均值、标准差与相对改进。用于结论的最后核验。",
+             annotations=_READ_ONLY)
 def compare_methods(budget: int = 200, seeds: int = 3) -> dict:
     budget = max(50, min(int(budget), 2000))
     seeds = max(1, min(int(seeds), 10))

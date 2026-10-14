@@ -301,6 +301,13 @@ AGH 给出的结论与本地实验一致：最优设计 13 片 × 高 30.7 mm ×
 | `results/agh_session.html` | 可浏览器直接打开的完整会话记录 |
 | `results/agh_session.jsonl` | 原生事件流，含 `tool` 类型 effect 与审批事件，可检索核对 |
 
+另有一次**带失败重试**的闭环记录：模型先核算一个凭经验的「直觉方案」
+（10 片 × 高 40 × 厚 2.5 × 基板 5 mm）得到 `feasible=false`（210.6 g 超重）与
+`verify_design.passed=false`，随后**自行诊断原因、改变参数重跑搜索**，再复核得到
+`passed=true`（13 片 × 30.7 × 2.0 × 2.0 mm）。留痕见
+`results/agh_retry_session.html` / `results/agh_retry_session.jsonl`，
+逐条证据（含机检验收标准 a/b/c）见随作品提交的《运行证据》文档 §6.6。
+
 ## 9. 注意事项与已知限制
 
 1. **二维截面模型**：忽略 z 向温度梯度并按单位深度换算，仅在等截面拉伸、
