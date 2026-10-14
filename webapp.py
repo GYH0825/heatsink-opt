@@ -265,8 +265,14 @@ select,input[type=number]{width:100%;font:inherit;padding:6px 8px;border:1px sol
 #field{width:100%;max-width:640px;display:block;margin:0 auto;border-radius:8px}
 .msg{margin-top:10px;font-size:13px;color:var(--muted);min-height:18px}
 .msg.bad{color:var(--warn)}
-#convBox{margin-top:16px;display:none}
-#conv{width:100%;height:150px;display:block}
+#convBox{margin-top:16px;display:none;position:relative}
+#conv{width:100%;height:150px;display:block;cursor:grab}
+#conv.dragging{cursor:grabbing}
+#conv.boxing{cursor:crosshair}
+.convhint{font-size:12px;color:var(--muted);margin-top:4px}
+.convtip{position:absolute;left:0;top:0;display:none;pointer-events:none;z-index:5;
+  background:#111827;color:#fff;font-size:12px;line-height:1.5;padding:4px 8px;border-radius:6px;
+  white-space:nowrap;transform:translate(-50%,-135%)}
 .specline{margin-top:14px;font-size:12px;color:var(--muted);line-height:1.7}
 </style>
 </head>
@@ -342,6 +348,8 @@ select,input[type=number]{width:100%;font:inherit;padding:6px 8px;border:1px sol
     <div id="convBox">
       <h2 style="margin-top:18px">搜索收敛过程</h2>
       <canvas id="conv" width="1040" height="300"></canvas>
+      <div id="convTip" class="convtip"></div>
+      <div class="convhint">滚轮缩放 · 拖动平移 · Shift+拖动框选放大 · 双击复位 · 悬停显示数值（Ctrl+滚轮仍是浏览器整页缩放）</div>
     </div>
 
     <div class="specline" id="specline"></div>
@@ -464,55 +472,247 @@ async function simulate(){
   }
 }
 
-function drawCurve(curve){
-  const c = $('conv');
-  const ctx = c.getContext('2d');
-  const W = c.width, H = c.height, padL = 62, padR = 18, padT = 18, padB = 34;
-  ctx.clearRect(0, 0, W, H);
+// ---- 收敛曲线：滚轮缩放 + 拖动平移 + Shift 框选放大 + 悬停数值（双击复位）----
+let convPts = null;    // 最近一次搜索的曲线点
+let convFull = null;   // 全量数据域
+let convView = null;   // 当前可视窗口
+let convHover = -1;    // 悬停命中的曲线点索引（-1 表示未命中）
+let convSel = null;    // 正在框选的矩形（画布后备缓冲坐标）
+let convBound = false; // 交互事件只绑定一次
 
-  const pts = curve.filter(p => p.best_r_th !== null);
-  if (pts.length < 2) return;
-
+function curveDomain(pts){
   const xs = pts.map(p => p.n_eval), ys = pts.map(p => p.best_r_th);
   const x0 = Math.min(...xs), x1 = Math.max(...xs);
   let y0 = Math.min(...ys), y1 = Math.max(...ys);
   if (y1 - y0 < 1e-6){ y1 = y0 + 0.01; y0 -= 0.01; }
   const pad = (y1 - y0) * 0.12; y0 -= pad; y1 += pad;
+  return {x0: x0, x1: x1 > x0 ? x1 : x0 + 1, y0: y0, y1: y1};
+}
 
-  const px = (x) => padL + (x - x0) / (x1 - x0) * (W - padL - padR);
-  const py = (y) => padT + (y1 - y) / (y1 - y0) * (H - padT - padB);
+// 把可视窗口夹在全量域内，并限制最小缩放倍率
+function convClamp(v){
+  const f = convFull;
+  let x0 = v.x0, x1 = v.x1, y0 = v.y0, y1 = v.y1;
+  const minX = (f.x1 - f.x0) * 0.02, minY = (f.y1 - f.y0) * 0.02;
+  if (x1 - x0 < minX){ const m = (x0 + x1) / 2; x0 = m - minX / 2; x1 = m + minX / 2; }
+  if (y1 - y0 < minY){ const m = (y0 + y1) / 2; y0 = m - minY / 2; y1 = m + minY / 2; }
+  if (x1 - x0 >= f.x1 - f.x0){ x0 = f.x0; x1 = f.x1; }
+  if (y1 - y0 >= f.y1 - f.y0){ y0 = f.y0; y1 = f.y1; }
+  if (x0 < f.x0){ x1 += f.x0 - x0; x0 = f.x0; }
+  if (x1 > f.x1){ x0 -= x1 - f.x1; x1 = f.x1; }
+  if (y0 < f.y0){ y1 += f.y0 - y0; y0 = f.y0; }
+  if (y1 > f.y1){ y0 -= y1 - f.y1; y1 = f.y1; }
+  return {x0: x0, x1: x1, y0: y0, y1: y1};
+}
+
+// 载入一次搜索的曲线：重置视图、绑定交互、重绘
+function setCurve(curve){
+  convPts = (curve || []).filter(p => p && typeof p.best_r_th === 'number');
+  convHover = -1; convSel = null;
+  if (convPts.length >= 2){
+    convFull = curveDomain(convPts);
+    convView = {...convFull};
+  } else {
+    convFull = null; convView = null;
+  }
+  bindConv();
+  drawCurve();
+}
+
+function drawCurve(){
+  const c = $('conv');
+  if (!convPts || convPts.length < 2 || !convView) return;
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height, padL = 62, padR = 18, padT = 18, padB = 34;
+  const v = convView;
+  ctx.clearRect(0, 0, W, H);
+
+  const px = (x) => padL + (x - v.x0) / (v.x1 - v.x0) * (W - padL - padR);
+  const py = (y) => padT + (v.y1 - y) / (v.y1 - v.y0) * (H - padT - padB);
 
   ctx.strokeStyle = '#e3e6ea'; ctx.lineWidth = 1;
   ctx.fillStyle = '#6b7280'; ctx.font = '16px "Microsoft YaHei",sans-serif';
   ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
   for (let i = 0; i <= 4; i++){
-    const val = y0 + (y1 - y0) * i / 4;
+    const val = v.y0 + (v.y1 - v.y0) * i / 4;
     const y = py(val);
     ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
     ctx.fillText(val.toFixed(3), padL - 8, y);
   }
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const narrow = (v.x1 - v.x0) < 20;
   for (let i = 0; i <= 4; i++){
-    const val = x0 + (x1 - x0) * i / 4;
-    ctx.fillText(Math.round(val), px(val), H - padB + 8);
+    const val = v.x0 + (v.x1 - v.x0) * i / 4;
+    ctx.fillText(narrow ? val.toFixed(1) : Math.round(val), px(val), H - padB + 8);
   }
 
+  ctx.save();
+  ctx.beginPath(); ctx.rect(padL, padT, W - padL - padR, H - padT - padB); ctx.clip();
   ctx.beginPath();
-  pts.forEach((p, i) => { const X = px(p.n_eval), Y = py(p.best_r_th);
+  convPts.forEach((p, i) => { const X = px(p.n_eval), Y = py(p.best_r_th);
     i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
   ctx.strokeStyle = '#0b7a45'; ctx.lineWidth = 2.5;
   ctx.lineJoin = 'round'; ctx.stroke();
 
-  const last = pts[pts.length - 1];
+  const last = convPts[convPts.length - 1];
   ctx.beginPath();
   ctx.arc(px(last.n_eval), py(last.best_r_th), 5, 0, Math.PI * 2);
   ctx.fillStyle = '#0b7a45'; ctx.fill();
+
+  if (convHover >= 0 && convHover < convPts.length){
+    const hp = convPts[convHover], hx = px(hp.n_eval), hy = py(hp.best_r_th);
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = '#9aa3af'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(hx, padT); ctx.lineTo(hx, H - padB); ctx.stroke();
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(hx, hy, 5.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = '#0b7a45'; ctx.stroke();
+  }
+  ctx.restore();
+
+  if (convSel){
+    const sx0 = Math.max(padL, Math.min(convSel.x0, convSel.x1));
+    const sy0 = Math.max(padT, Math.min(convSel.y0, convSel.y1));
+    const sx1 = Math.min(W - padR, Math.max(convSel.x0, convSel.x1));
+    const sy1 = Math.min(H - padB, Math.max(convSel.y0, convSel.y1));
+    if (sx1 > sx0 && sy1 > sy0){
+      ctx.fillStyle = 'rgba(11,122,69,0.13)';
+      ctx.fillRect(sx0, sy0, sx1 - sx0, sy1 - sy0);
+      ctx.strokeStyle = 'rgba(11,122,69,0.8)'; ctx.lineWidth = 1;
+      ctx.strokeRect(sx0, sy0, sx1 - sx0, sy1 - sy0);
+    }
+  }
 
   ctx.fillStyle = '#6b7280'; ctx.font = '15px "Microsoft YaHei",sans-serif';
   ctx.textAlign = 'left'; ctx.textBaseline = 'top';
   ctx.fillText('R_th [°C/W]', 6, 2);
   ctx.textAlign = 'right';
   ctx.fillText('设计评估次数', W - padR, H - padB + 8);
+}
+
+// 屏幕坐标 → 画布后备缓冲坐标（CSS 尺寸与后备缓冲不一致，必须换算）
+function convXY(e){
+  const c = $('conv'), r = c.getBoundingClientRect();
+  return [(e.clientX - r.left) * c.width / r.width,
+          (e.clientY - r.top) * c.height / r.height];
+}
+
+// 悬停命中：在容差内找离光标最近的数据点（画布后备缓冲坐标）
+function convHit(mx, my){
+  if (!convPts || !convView) return -1;
+  const c = $('conv'), W = c.width, H = c.height;
+  const PL = 62, PR = 18, PT = 18, PB = 34;
+  if (mx < PL || mx > W - PR || my < PT || my > H - PB) return -1;
+  const v = convView;
+  let best = -1, bd = 16;
+  convPts.forEach((p, i) => {
+    const X = PL + (p.n_eval - v.x0) / (v.x1 - v.x0) * (W - PL - PR);
+    const Y = PT + (v.y1 - p.best_r_th) / (v.y1 - v.y0) * (H - PT - PB);
+    const d = Math.hypot(X - mx, Y - my);
+    if (d < bd){ bd = d; best = i; }
+  });
+  return best;
+}
+
+// 悬停提示：显示该点的评估次数与热阻；i<0 或 e 缺省则隐藏
+function convTip(i, e){
+  const tip = $('convTip');
+  if (!tip) return;
+  if (i < 0 || !convPts || !convPts[i] || !e){ tip.style.display = 'none'; return; }
+  const box = $('convBox').getBoundingClientRect();
+  tip.textContent = '设计评估 ' + convPts[i].n_eval + ' 次　R_th ' +
+    Number(convPts[i].best_r_th).toFixed(4) + ' °C/W';
+  tip.style.left = (e.clientX - box.left) + 'px';
+  tip.style.top = (e.clientY - box.top) + 'px';
+  tip.style.display = 'block';
+}
+
+function bindConv(){
+  if (convBound) return;              // 事件只绑一次，重复载入曲线不会叠加监听
+  convBound = true;
+  const c = $('conv');
+  const PL = 62, PR = 18, PT = 18, PB = 34;
+
+  c.addEventListener('wheel', (e) => {
+    if (!convView) return;
+    if (e.ctrlKey) return;                 // 让 Ctrl+滚轮 仍走浏览器的整页缩放
+    e.preventDefault();
+    const xy = convXY(e), mx = xy[0], my = xy[1], v = convView;
+    const dx = v.x0 + (mx - PL) / (c.width - PL - PR) * (v.x1 - v.x0);
+    const dy = v.y1 - (my - PT) / (c.height - PT - PB) * (v.y1 - v.y0);
+    const k = Math.exp(e.deltaY * 0.0015);  // 上滚 k<1 放大，下滚 k>1 缩小
+    convView = convClamp({
+      x0: dx - (dx - v.x0) * k, x1: dx + (v.x1 - dx) * k,
+      y0: dy - (dy - v.y0) * k, y1: dy + (v.y1 - dy) * k});
+    drawCurve();
+  }, {passive: false});
+
+  let drag = null;
+  c.addEventListener('mousedown', (e) => {
+    if (!convView) return;
+    const xy = convXY(e);
+    if (e.shiftKey){                       // Shift+拖动 = 框选放大
+      drag = {mode: 'box', mx: xy[0], my: xy[1]};
+      convSel = {x0: xy[0], y0: xy[1], x1: xy[0], y1: xy[1]};
+      c.classList.add('boxing');
+    } else {                               // 直接拖动 = 平移
+      drag = {mode: 'pan', mx: xy[0], my: xy[1], base: {...convView}};
+      c.classList.add('dragging');
+    }
+    e.preventDefault();
+  });
+  c.addEventListener('mousemove', (e) => {
+    const xy = convXY(e), mx = xy[0], my = xy[1];
+    if (drag){
+      if (drag.mode === 'box'){
+        convSel = {x0: drag.mx, y0: drag.my, x1: mx, y1: my};
+        drawCurve();
+        return;
+      }
+      const b = drag.base;
+      const kx = (b.x1 - b.x0) / (c.width - PL - PR), ky = (b.y1 - b.y0) / (c.height - PT - PB);
+      const ddx = -(mx - drag.mx) * kx, ddy = (my - drag.my) * ky;
+      convView = convClamp({
+        x0: b.x0 + ddx, x1: b.x1 + ddx, y0: b.y0 + ddy, y1: b.y1 + ddy});
+      drawCurve();
+      return;
+    }
+    // 未拖动 → 悬停高亮 + 数值提示
+    const h = convHit(mx, my);
+    if (h !== convHover){ convHover = h; drawCurve(); }
+    convTip(h, e);
+  });
+  const endDrag = () => {
+    if (drag && drag.mode === 'box'){
+      const s = convSel; convSel = null;
+      if (s && convView){
+        const x0 = Math.min(s.x0, s.x1), x1 = Math.max(s.x0, s.x1);
+        const y0 = Math.min(s.y0, s.y1), y1 = Math.max(s.y0, s.y1);
+        // 忽略过小的框选（避免单击误触），并把屏幕像素矩形折算成数据窗口
+        if (x1 - x0 > 8 && y1 - y0 > 8){
+          const v = convView;
+          const toX = (X) => v.x0 + (X - PL) / (c.width - PL - PR) * (v.x1 - v.x0);
+          const toY = (Y) => v.y1 - (Y - PT) / (c.height - PT - PB) * (v.y1 - v.y0);
+          convView = convClamp({x0: toX(x0), x1: toX(x1), y0: toY(y1), y1: toY(y0)});
+        }
+      }
+      drag = null; c.classList.remove('boxing'); drawCurve(); return;
+    }
+    drag = null; c.classList.remove('dragging'); c.classList.remove('boxing');
+  };
+  c.addEventListener('mouseup', endDrag);
+  c.addEventListener('mouseleave', () => {
+    endDrag();
+    if (convHover !== -1){ convHover = -1; drawCurve(); }
+    convTip(-1);
+  });
+  c.addEventListener('dblclick', () => {
+    if (!convFull) return;
+    convView = {...convFull};
+    drawCurve();
+  });
 }
 
 async function optimize(){
@@ -545,7 +745,7 @@ async function optimize(){
     applyMetrics(d);
     $('field').src = d.image;
     $('convBox').style.display = 'block';
-    drawCurve(d.curve);
+    setCurve(d.curve);
 
     const name = d.method === 'adaptive' ? '自适应邻域搜索' : '随机搜索';
     $('optMsg').className = 'msg';
