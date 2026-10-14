@@ -9,3 +9,6 @@ dist/
 build_mcp.log
 build_pyinstaller.log
 daemon_start.log
+
+# 交付物里的安装包：145 MB，超过 GitHub 单文件 100 MB 硬上限，改由 Release 分发
+交付物/*.zip
