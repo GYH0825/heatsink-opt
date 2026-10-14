@@ -66,7 +66,12 @@ python mcp_server.py
 ├── mcp_server.py           MCP 工具层（6 个工具，供 AGH 调用）
 ├── selfcheck.py            MCP 端到端自检
 ├── webapp.py               网页操作台（FastAPI：滑块调参 + 一键搜最优）
-└── results/                实验产出（图 + CSV）
+├── app_launcher.py         绿色版入口：启动自检 + 起服务 + 自动开浏览器（打包入口）
+├── streamlit_app.py        云端网页版（Streamlit，供线上体验链接）
+├── 散热器调参平台.spec        PyInstaller 打包配置（网页操作台绿色版）
+├── 散热器MCP工具.spec         PyInstaller 打包配置（MCP 工具绿色版）
+├── results/                实验产出：图、CSV、AGH 会话留痕（html / jsonl）
+└── 交付物/                 提交材料：技术信息、测试用例、运行证据、演示逐字稿
 ```
 
 ## 3. 物理模型
@@ -370,7 +375,7 @@ AGH 给出的结论与本地实验一致：最优设计 13 片 × 高 30.7 mm ×
 `verify_design.passed=false`，随后**自行诊断原因、改变参数重跑搜索**，再复核得到
 `passed=true`（13 片 × 30.7 × 2.0 × 2.0 mm）。留痕见
 `results/agh_retry_session.html` / `results/agh_retry_session.jsonl`，
-逐条证据（含机检验收标准 a/b/c）见随作品提交的《运行证据》文档 §6.6。
+逐条证据（含机检验收标准 a/b/c）见 `交付物/运行证据.md` §6.6。
 
 ## 10. 注意事项与已知限制
 
